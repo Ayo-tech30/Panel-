@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════
+# oracle-setup.sh — Full automated setup for Oracle Cloud Free Tier
+# Run this ONCE on a fresh Ubuntu 22.04 VM as the default 'ubuntu' user
+#
+# What it does:
+#   1. Updates system packages
+#   2. Installs Node.js 20, npm, git, nginx, certbot
+#   3. Installs PM2 globally
+#   4. Opens firewall ports (80, 443, 3001)
+#   5. Clones/copies the panel project
+#   6. Installs all dependencies
+#   7. Builds the Next.js frontend
+#   8. Configures nginx as reverse proxy
+#   9. Sets up PM2 to start on reboot
+#  10. Starts everything
+#
+# Usage:
+#   chmod +x oracle-setup.sh
+#   ./oracle-setup.sh
+# ═══════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+# ─── CONFIG — edit before running ─────────────────────────────────
+DOMAIN=""                          # e.g. "panel.yourdomain.com" — leave empty to use IP
+PROJECT_DIR="/opt/whatsapp-panel"
+ADMIN_PASSWORD="ibraheem123"
+JWT_SECRET=$(openssl rand -hex 32)
+# ──────────────────────────────────────────────────────────────────
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+log()  { echo -e "${GREEN}[✓]${NC} $1"; }
+warn() { echo -e "${YELLOW}[!]${NC} $1"; }
+err()  { echo -e "${RED}[✗]${NC} $1"; exit 1; }
+
+echo ""
+echo "  ██╗    ██╗ █████╗     ██████╗  █████╗ ███╗   ██╗███████╗██╗"
+echo "  ██║    ██║██╔══██╗    ██╔══██╗██╔══██╗████╗  ██║██╔════╝██║"
+echo "  ██║ █╗ ██║███████║    ██████╔╝███████║██╔██╗ ██║█████╗  ██║"
+echo "  ██║███╗██║██╔══██║    ██╔═══╝ ██╔══██║██║╚██╗██║██╔══╝  ██║"
+echo "  ╚███╔███╔╝██║  ██║    ██║     ██║  ██║██║ ╚████║███████╗███████╗"
+echo "   ╚══╝╚══╝ ╚═╝  ╚═╝    ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝╚══════╝"
+echo ""
+echo "  WhatsApp Bot Panel — Oracle Cloud Setup"
+echo "  ─────────────────────────────────────────"
+echo ""
+
+# ─── 1. System update ─────────────────────────────────────────────
+log "Updating system packages..."
+sudo apt-get update -qq && sudo apt-get upgrade -y -qq
+
+# ─── 2. Install Node.js 20 ────────────────────────────────────────
+log "Installing Node.js 20..."
+if ! command -v node &>/dev/null || [[ $(node -v | cut -d. -f1 | tr -d 'v') -lt 20 ]]; then
+  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - >/dev/null
+  sudo apt-get install -y nodejs -qq
+fi
+log "Node: $(node -v) | npm: $(npm -v)"
+
+# ─── 3. Install system tools ──────────────────────────────────────
+log "Installing git, nginx, certbot, build tools..."
+sudo apt-get install -y git nginx certbot python3-certbot-nginx build-essential -qq
+
+# ─── 4. Install PM2 globally ──────────────────────────────────────
+log "Installing PM2..."
+sudo npm install -g pm2 --silent
+
+# ─── 5. Oracle Cloud firewall + iptables ──────────────────────────
+log "Opening firewall ports (80, 443, 3001)..."
+
+# Ubuntu UFW
+sudo ufw allow 22/tcp   2>/dev/null || true
+sudo ufw allow 80/tcp   2>/dev/null || true
+sudo ufw allow 443/tcp  2>/dev/null || true
+sudo ufw allow 3001/tcp 2>/dev/null || true
+sudo ufw --force enable 2>/dev/null || true
+
+# Oracle also uses iptables — must allow through the chain
+sudo iptables -I INPUT -p tcp --dport 80   -j ACCEPT 2>/dev/null || true
+sudo iptables -I INPUT -p tcp --dport 443  -j ACCEPT 2>/dev/null || true
+sudo iptables -I INPUT -p tcp --dport 3001 -j ACCEPT 2>/dev/null || true
+
+# Persist iptables rules
+sudo apt-get install -y iptables-persistent -qq 2>/dev/null || true
+sudo netfilter-persistent save 2>/dev/null || true
+
+# ─── 6. Copy project files ────────────────────────────────────────
+log "Setting up project directory at $PROJECT_DIR..."
+sudo mkdir -p $PROJECT_DIR
+sudo chown -R ubuntu:ubuntu $PROJECT_DIR
+
+# If running this from inside the project folder, copy it
+if [ -f "$(dirname "$0")/backend/server.js" ]; then
+  log "Copying project files from current directory..."
+  cp -r "$(dirname "$0")/." $PROJECT_DIR/
+else
+  warn "Project files not found next to script."
+  warn "Please manually copy your project to $PROJECT_DIR"
+  warn "Then re-run: bash $PROJECT_DIR/oracle-setup.sh"
+  exit 1
+fi
+
+cd $PROJECT_DIR
+
+# ─── 7. Create .env ───────────────────────────────────────────────
+log "Creating .env file..."
+
+# Detect public IP if no domain set
+if [ -z "$DOMAIN" ]; then
+  PUBLIC_IP=$(curl -s ifconfig.me || curl -s icanhazip.com)
+  FRONTEND_URL="http://$PUBLIC_IP"
+  API_URL="http://$PUBLIC_IP:3001"
+  warn "No domain set — using IP: $PUBLIC_IP"
+  warn "For HTTPS, set DOMAIN= in this script and rerun, or see SSL section below"
+else
+  FRONTEND_URL="https://$DOMAIN"
+  API_URL="https://$DOMAIN/api-backend"
+fi
+
+cat > $PROJECT_DIR/.env << EOF
+# WhatsApp Panel — Generated by oracle-setup.sh
+JWT_SECRET=$JWT_SECRET
+ADMIN_PASSWORD=$ADMIN_PASSWORD
+BACKEND_PORT=3001
+FRONTEND_URL=$FRONTEND_URL
+NEXT_PUBLIC_API_URL=$API_URL
+NODE_ENV=production
+EOF
+
+log ".env created. JWT_SECRET auto-generated."
+echo ""
+echo "  ┌─ Your credentials ──────────────────────────────────┐"
+echo "  │  Email:    ibraheemyakub48@gmail.com                │"
+echo "  │  Password: $ADMIN_PASSWORD                           │"
+echo "  │  URL:      $FRONTEND_URL                             │"
+echo "  └─────────────────────────────────────────────────────┘"
+echo ""
+
+# ─── 8. Install dependencies ──────────────────────────────────────
+log "Installing backend dependencies..."
+cd $PROJECT_DIR/backend && npm install --production --silent
+
+log "Installing frontend dependencies..."
+cd $PROJECT_DIR/frontend && npm install --silent
+
+log "Installing bot template dependencies..."
+cd $PROJECT_DIR/bots/templates/basic && npm install --production --silent
+
+# ─── 9. Build Next.js frontend ────────────────────────────────────
+log "Building Next.js frontend (this takes ~1-2 min)..."
+cd $PROJECT_DIR/frontend
+NEXT_PUBLIC_API_URL=$API_URL npm run build
+
+# ─── 10. Setup PM2 ecosystem ──────────────────────────────────────
+log "Creating PM2 ecosystem config..."
+cat > $PROJECT_DIR/ecosystem.config.js << 'EOF'
+// PM2 Ecosystem — manages backend + frontend as persistent services
+module.exports = {
+  apps: [
+    {
+      name: 'panel-backend',
+      script: 'server.js',
+      cwd: '/opt/whatsapp-panel/backend',
+      env_file: '/opt/whatsapp-panel/.env',
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '300M',
+      error_file: '/opt/whatsapp-panel/logs/backend-err.log',
+      out_file: '/opt/whatsapp-panel/logs/backend-out.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+    },
+    {
+      name: 'panel-frontend',
+      script: 'node_modules/.bin/next',
+      args: 'start -p 3000',
+      cwd: '/opt/whatsapp-panel/frontend',
+      env: {
+        NODE_ENV: 'production',
+        PORT: 3000,
+      },
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '400M',
+      error_file: '/opt/whatsapp-panel/logs/frontend-err.log',
+      out_file: '/opt/whatsapp-panel/logs/frontend-out.log',
+    },
+  ],
+};
+EOF
+
+mkdir -p $PROJECT_DIR/logs
+
+# ─── 11. Configure nginx ──────────────────────────────────────────
+log "Configuring nginx reverse proxy..."
+
+sudo tee /etc/nginx/sites-available/whatsapp-panel > /dev/null << NGINX
+# WhatsApp Bot Panel — nginx config
+# Frontend on :3000, Backend API on :3001, WebSocket on /ws/logs
+
+server {
+    listen 80;
+    server_name ${DOMAIN:-_};
+
+    # Increase timeouts for WebSocket + long-running requests
+    proxy_read_timeout 3600;
+    proxy_send_timeout 3600;
+
+    # ── Frontend (Next.js) ──────────────────────────────────────
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_cache_bypass \$http_upgrade;
+    }
+
+    # ── Backend API ─────────────────────────────────────────────
+    location /api/ {
+        proxy_pass http://127.0.0.1:3001/api/;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+    }
+
+    # ── WebSocket log streaming ─────────────────────────────────
+    location /ws/ {
+        proxy_pass http://127.0.0.1:3001/ws/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "Upgrade";
+        proxy_set_header Host \$host;
+        proxy_read_timeout 86400;
+    }
+
+    # ── Health check ────────────────────────────────────────────
+    location /health {
+        proxy_pass http://127.0.0.1:3001/health;
+    }
+}
+NGINX
+
+sudo ln -sf /etc/nginx/sites-available/whatsapp-panel /etc/nginx/sites-enabled/
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+log "nginx configured and reloaded"
+
+# ─── 12. Start everything with PM2 ───────────────────────────────
+log "Starting services with PM2..."
+cd $PROJECT_DIR
+pm2 start ecosystem.config.js
+pm2 save
+
+# ─── 13. PM2 startup on reboot ───────────────────────────────────
+log "Setting up PM2 auto-start on reboot..."
+PM2_STARTUP=$(pm2 startup systemd -u ubuntu --hp /home/ubuntu 2>&1 | grep "sudo")
+if [ -n "$PM2_STARTUP" ]; then
+  eval "sudo $PM2_STARTUP" 2>/dev/null || true
+fi
+pm2 save
+
+# ─── Done ─────────────────────────────────────────────────────────
+echo ""
+echo "  ════════════════════════════════════════════════════════"
+echo "  ✅  SETUP COMPLETE"
+echo "  ════════════════════════════════════════════════════════"
+echo ""
+echo "  🌐 Panel URL:   $FRONTEND_URL"
+echo "  🔌 Backend API: $API_URL"
+echo "  📧 Admin:       ibraheemyakub48@gmail.com"
+echo "  🔑 Password:    $ADMIN_PASSWORD"
+echo ""
+echo "  Useful commands:"
+echo "    pm2 status              — view all processes"
+echo "    pm2 logs panel-backend  — backend logs"
+echo "    pm2 restart all         — restart everything"
+echo "    pm2 monit               — live resource monitor"
+echo ""
+if [ -z "$DOMAIN" ]; then
+echo "  ⚠️  HTTPS: Set a domain in this script and run:"
+echo "    sudo certbot --nginx -d yourdomain.com"
+echo ""
+fi
+echo "  ════════════════════════════════════════════════════════"

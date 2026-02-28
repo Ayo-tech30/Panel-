@@ -1,0 +1,21 @@
+# .replit — Replit project configuration
+# Runs both backend and frontend concurrently
+
+run = "bash start.sh"
+entrypoint = "start.sh"
+language = "nodejs"
+
+[nix]
+channel = "stable-23_11"
+
+[env]
+NODE_ENV = "production"
+NEXT_TELEMETRY_DISABLED = "1"
+
+[[ports]]
+localPort = 3000
+externalPort = 80
+
+[[ports]]
+localPort = 3001
+externalPort = 3001

@@ -1,0 +1,12 @@
+{
+  "name": "whatsapp-panel",
+  "version": "1.0.0",
+  "scripts": {
+    "install:all": "cd backend && npm install && cd ../frontend && npm install && cd ../bots/templates/basic && npm install",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "start:backend": "cd backend && npm start",
+    "start:frontend": "cd frontend && npm start",
+    "setup": "cp .env.example .env && npm run install:all"
+  }
+}
